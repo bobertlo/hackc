@@ -6,7 +6,7 @@ OBJS=${SRC:%.c=%.o}
 all: ${BIN}
 
 ${BIN}: ${OBJS}
-	${CC} -o $@ $<
+	${CC} -o $@ ${OBJS}
 
 %.o: %.c ${HDR}
 	${CC} -c $<
