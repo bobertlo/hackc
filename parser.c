@@ -190,6 +190,17 @@ token gettok(parser_ctx *p) {
 	}
 }
 
+void free_line(parser_ctx *p) {
+	for (int i=0; i<LINE_MAX_TOKENS; i++) {
+		// free string memory
+		if (p->tok_buf[i].token == TOK_STRING) {
+			free(p->tok_buf[i].dat.string);
+		}
+		// clear tokens
+		p->tok_buf[i].token = '\0';
+	}
+}
+
 void lex_line(parser_ctx *p) {
 	int i;
 
@@ -202,6 +213,37 @@ void lex_line(parser_ctx *p) {
 	}
 	if (i == LINE_MAX_TOKENS) {
 		plnerror(p->line, "Too many tokens.\n");
+	}
+}
+
+void print_line(parser_ctx *p) {
+	if (p->tok_buf[0].token == TOK_NEWLINE)
+		return;
+
+	if (p->tok_buf[0].token == TOK_EOF) {
+		fprintf(stderr, "EOF\n");
+		return;
+	}
+
+	fprintf(stderr, "%i: ", p->line);
+
+	for (token *t = p->tok_buf; t->token != '\0'; t++) {
+		switch(t->token) {
+		case TOK_STRING:
+			fprintf(stderr, "'%s' ", t->dat.string);
+			break;
+		case TOK_NUMBER:
+			fprintf(stderr, "%i ", t->dat.string);
+			break;
+		case TOK_NEWLINE:
+			fprintf(stderr, "\n");
+			break;
+		case TOK_EOF:
+			fprintf(stderr, "EOF");
+			break;
+		default:
+			fprintf(stderr, "%c ", t->token);
+		}
 	}
 }
 
@@ -254,4 +296,147 @@ uint16_t parse_dest(parser_ctx *p, const char *str) {
 	return dest;
 }
 
+char tokchar(parser_ctx *p, token *t) {
+	switch(t->token) {
+	case TOK_STRING:
+		if (strlen(t->dat.string) != 1) {
+			plnerror(p->line, "invalid comp mnemonic\n");
+		}
+		return t->dat.string[0];
+	case TOK_NUMBER:
+		if (t->dat.number == 1) {
+			return '1';
+		} else if (t->dat.number == 0) {
+			return '0';
+		} else {
+			plnerror(p->line, "Invalid comp mnemonic");
+		}
+	case TOK_NEWLINE:
+	case TOK_EOF:
+		// this should never happen
+		plnerror(p->line, "unexpected newline");
+	default:
+		return t->token;
+	}
+}
 
+// parse a comp mnemonic (starting with the first token. cannot include dest!)
+uint16_t parse_comp(parser_ctx *p, token *t) {
+	int i;
+	char m[4];
+
+	// read the token into a string buffer
+	for (i=0; i<3; i++) {
+		if (t[i].token == ';' || t[i].token == TOK_NEWLINE || t[i].token == TOK_EOF) {
+			break;
+		} else {
+			m[i] = tokchar(p, &t[i]);
+		}
+	}
+	m[i] = '\0';
+	fprintf(stderr, "  comp: %s\n", m);
+
+	for (stringmap *map = comptab; map->key; map++) {
+		if (strcmp(map->key, m) == 0) {
+			return map->val;
+		}
+	}
+
+	plnerror(p->line, "invalid comp mnemonic\n");
+}
+
+// parse a jump pnemonic (string)
+uint16_t parse_jump(parser_ctx *p, const char *s) {
+	for (stringmap *m = jumptab; m->key; m++) {
+		if (strcmp(m->key, s) == 0) {
+			return m->val;
+		}
+	}
+	plnerror(p->line, "invalid jump mnemonic\n");
+}
+
+void parse_comp_line(parser_ctx *p, token *t) {
+	uint16_t dest = 0x0000;
+	uint16_t comp = 0x0000;
+	uint16_t jump = 0x0000;
+
+	// handle dest mnemonic if present
+	if (t[1].token == '=') {
+		dest = parse_dest(p, t->dat.string);
+		fprintf(stderr, "  dest:%04x\n", dest);
+		t += 2;
+	}
+
+	comp = parse_comp(p, t);
+	fprintf(stderr, "  comp: %04x\n", comp);
+
+	for (; t->token != TOK_NEWLINE; t++) {
+		if (t->token == ';') {
+			if (t[1].token != TOK_STRING) {
+				plnerror(p->line, "expected string after ';'");
+			}
+			jump = parse_jump(p, t[1].dat.string);
+			fprintf(stderr, "  jump: %04x\n", jump);
+		}
+	}
+	fprintf(stderr, "  %04x\n", comp|dest|jump);
+
+	insert_instruction(&p->ilist, new_code_instruction(comp|dest|jump));
+}
+
+// determine the instruction type for the current line and parse it
+void parse_line(parser_ctx *p) {
+	token *t = p->tok_buf;
+	if (t->token == TOK_EOF || t->token == TOK_NEWLINE) {
+		return;
+	} else if (t->token == '@') {
+		parse_address(p, t+1);
+	} else if (t->token == '(') {
+		parse_label(p, t+1);
+	} else {
+		parse_comp_line(p, t);
+	}
+}
+
+void parse(parser_ctx *p) {
+	while(p->eof == 0) {
+		free_line(p);
+		lex_line(p);
+		print_line(p);
+		parse_line(p);
+	}
+}
+
+void link(parser_ctx *p) {
+	for (instruction *i = p->ilist.head; i != NULL; i = i->next) {
+		if (i->type == I_REF) {
+			symbol *s = symtab_lookup(p->symbols, i->dat.symbol);
+			if (s == NULL) {
+				fprintf(stderr, "@%s -> %04x\n", i->dat.symbol, p->nextvar);
+				symtab_insert(&p->symbols, i->dat.symbol, p->nextvar);
+				free(i->dat.symbol);
+				i->type = I_CODE;
+				i->dat.code = p->nextvar;
+				p->nextvar++;
+			} else {
+				i->type = I_CODE;
+				free(i->dat.symbol);
+				i->dat.code = s->val;
+				fprintf(stderr, "@%s -> %04x\n", s->key, s->val);
+			}
+		}
+	}
+}
+
+void emit(parser_ctx *p, FILE *out) {
+	for (instruction *ip = p->ilist.head; ip != NULL; ip = ip->next) {
+		if (ip->type != I_CODE) {
+			plnerror(0, "link error detected, aborting\n");
+		}
+		for (int i=15; i>=0; i--) {
+			uint16_t bit = ip->dat.code & (1 << i);
+			fputc((bit == 0) ? '0' : '1', out);
+		}
+		fputc('\n', out);
+	}
+}
